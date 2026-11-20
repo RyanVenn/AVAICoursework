@@ -34,16 +34,21 @@ LR_DIR = '../../data/DIV2K_valid_LR_x8'
 # Crop images so that the HR and LR pairs align with their scaling
 # TODO: comment out
 def crop_image_pair(hr_img, lr_img, scale, crop):
-    w = min(lr_img.size[0], hr_img.size[0] // scale)
-    h = min(lr_img.size[1], hr_img.size[1] // scale)
+    lr_crop = crop_image(lr_img, d=4)
+    x0 = (lr_img.size[0] - lr_crop.size[0]) // 2
+    y0 = (lr_img.size[1] - lr_crop.size[1]) // 2
+    w, h = lr_crop.size
     
     if crop:
-        w, h = min(w, crop // scale), min(h, crop // scale)
-    
-    w, h = w // 4 * 4, h // 4 * 4
-    
-    return (hr_img.crop((0, 0, w * scale, h * scale)),
-            lr_img.crop((0, 0, w, h)))    
+        cw = min(w, crop // scale) // 4 * 4
+        ch = min(h, crop // scale) // 4 * 4
+        x0 += (w - cw) // 2
+        y0 += (h - ch) // 2
+        w, h = cw, ch
+        
+    lr_crop = lr_img.crop((x0, y0, x0 + w, y0 + h))
+    hr_crop = hr_img.crop((x0*scale, y0*scale, (x0+w)*scale, (y0+h)*scale))
+    return hr_crop, lr_crop
 
 # Define the degredation operator
 def downsampler(x, factor):
@@ -150,3 +155,6 @@ def main(args):
 
 if __name__ == "__main__":
     main(parser.parse_args())
+
+
+# TODO: add SSIM and LPIPS
