@@ -16,6 +16,9 @@ import lpips
 import argparse
 import os
 import time
+import csv
+import itertools
+import copy
 
 parser = argparse.ArgumentParser(
     description="Train a SIREN (INR) on DIV2k",
@@ -28,6 +31,11 @@ parser.add_argument("--iters", default=2000, type=int)
 parser.add_argument("--learning-rate", default=1e-4, type=float)
 parser.add_argument("--seed", default=0, type=int)
 parser.add_argument("--noise-sigma", default=0.0, type=float)
+parser.add_argument("--omega", default=30, type=int)
+parser.add_argument("--hidden-features", default=256, type=int)
+parser.add_argument("--hidden-layers", default=3, type=int)
+parser.add_argument("--tune-hyperparams", action="store_true")
+parser.add_argument("--tune-images", nargs="+", default=["0801", "0806", "0840"])
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.cuda.FloatTensor
@@ -79,7 +87,7 @@ def render(siren, coords, H, W):
     out = torch.cat([siren(c)[0] for c in coords.split(65536)])
     return ((out + 1) / 2).reshape(H, W, 3).permute(2, 0, 1)[None]
 
-def main(args):
+def runINR(args, lpips_fn, cps=(), log=True):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
@@ -102,8 +110,8 @@ def main(args):
         lr_img = downsampler(lr_img, 2).clamp(0, 1)
 
     # Initialize a SIREN model
-    siren = Siren(in_features=2, out_features=3, hidden_features=256,
-                 hidden_layers=3, outermost_linear=True).to(DEVICE)
+    siren = Siren(in_features=2, out_features=3, hidden_features=args.hidden_features,
+                    hidden_layers=args.hidden_layers, outermost_linear=True, first_omega_0=args.omega).to(DEVICE)
     H, W = hr_img.shape[-2:]
     h, w = lr_img.shape[-2:]
     hr_coords = get_mgrid(H, W).to(DEVICE)
@@ -111,7 +119,6 @@ def main(args):
     
     # Initialize optimizer and evaluation metrics
     optim = torch.optim.Adam(lr=args.learning_rate, params=siren.parameters())
-    lpips_fn = lpips.LPIPS(net="alex").to(DEVICE)
     bicubic = F.interpolate(lr_img, size=(H, W), mode="bicubic", align_corners=False).clamp(0, 1)
     mse = torch.nn.MSELoss().type(dtype)
     
@@ -119,6 +126,7 @@ def main(args):
     start = time.time()
     
     lr_pixels = (lr_img * 2 - 1)[0].permute(1, 2, 0).reshape(-1, 3)
+    results = []
     
     for i in range(1, args.iters + 1):
         out, _ = siren(lr_coords)
@@ -127,20 +135,63 @@ def main(args):
         loss.backward()
         optim.step()
         
-        if i % 100 == 0 or i == args.iters:
+        if i in cps:
+            sr = render(siren, hr_coords, H, W)
+            results.append((i,) + evaluate(sr, hr_img, lpips_fn))
+        
+        if (i % 100 == 0 or i == args.iters) and log:
             sr = render(siren, hr_coords, H, W)
             p = psnr_fn(hr_img[0].cpu().numpy(), sr.clamp(0, 1)[0].cpu().numpy(), data_range=1)
             print ('Iteration: ', i, ' Loss: ', loss.item(), ' PSNR_gt: ', p)   
 
     elapsed = time.time() - start
+    if log:
+        print(f"time elapsed: {elapsed:.2f}s")  
     
-    for name, img in [("bicubic", bicubic), ("siren", sr)]:
-        p, s, l = evaluate(img, hr_img, lpips_fn)
-        print (f"{name} PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}")
-    print(f"time elapsed: {elapsed:.2f}s")     
-    
-    save_image(torch.cat([bicubic, sr.clamp(0, 1), hr_img]), f"results/inr_{args.img_id}.png", nrow=3)
+    if log:
+        for name, img in [("bicubic", bicubic), ("siren", sr)]:
+            p, s, l = evaluate(img, hr_img, lpips_fn)
+            print (f"{name} PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}")   
         
+        save_image(torch.cat([bicubic, sr.clamp(0, 1), hr_img]), f"results/inr_{args.img_id}.png", nrow=3)
+    
+    return results
+    
+# Performs a search over selected hyperparameters
+# TODO write up tests: lr, omega - [10, 20, 30, 45, 60], [1e-4, 3e-4, 1e-3]
+def searchParams(args, lpips_fn):
+    cps = [250, 500, 1000, 2000, 4000]
+    os.makedirs("results", exist_ok=True)
+    results = {}
+    
+    with open("results/inrTuning.csv", "a", newline="") as f:
+        w = csv.writer(f)
+        for hiddenFeatures, hiddenLayers in itertools.product([128, 256, 512], [2, 3, 4]):
+            for img_id in args.tune_images:
+                a = copy.copy(args)
+                a.img_id, a.hidden_features, a.hidden_layers, a.iters = img_id, hiddenFeatures, hiddenLayers, max(cps)
+                start = time.time()
+                res = runINR(a, lpips_fn, cps, log=False)
+                for iteration, p, s, l in res:
+                    results.setdefault((hiddenFeatures, hiddenLayers, iteration), []).append((p, s, l))
+                    w.writerow([img_id, hiddenFeatures, hiddenLayers, iteration, f"PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}"])
+                f.flush()
+                torch.cuda.empty_cache()
+                print(f"{img_id} hiddenFeatures: {hiddenFeatures} hiddenLayers: {hiddenLayers} PSNR: {p:.4f} SSIM: {s:.4f} LPIPS: {l:.4f} "
+                      f"time elapsed: {time.time() - start:.2f}s")
+        
+        sortedRes = sorted(((np.mean([r[0] for r in v]), np.mean([r[1] for r in v]),
+                            np.mean([r[2] for r in v]), k) for k, v in results.items()), reverse=True)
+        for p, s, l, (hiddenFeatures, hiddenLayers, iteration) in sortedRes[:10]:
+            print(f"hiddenFeatures: {hiddenFeatures} hiddenLayers: {hiddenLayers} iter: {iteration} PSNR: {p:.4f} SSIM: {s:.4f} LPIPS: {l:.4f}")
+
+def main(args):
+    lpips_fn = lpips.LPIPS(net="alex").to(DEVICE)
+    if args.tune_hyperparams:
+        searchParams(args, lpips_fn)
+    else:
+        runINR(args, lpips_fn)
+            
 if __name__ == "__main__":
     main(parser.parse_args())
     

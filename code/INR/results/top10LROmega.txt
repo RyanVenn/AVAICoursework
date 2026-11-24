@@ -1,0 +1,23 @@
+omega: 30 lr: 0.0001 iter: 1000 PSNR: 24.9284 SSIM: 0.6723 LPIPS: 0.5554
+omega: 30 lr: 0.0001 iter: 2000 PSNR: 24.9234 SSIM: 0.6723 LPIPS: 0.5525
+omega: 20 lr: 0.0001 iter: 1000 PSNR: 24.9226 SSIM: 0.6722 LPIPS: 0.5552
+omega: 30 lr: 0.0001 iter: 500 PSNR: 24.9145 SSIM: 0.6707 LPIPS: 0.5637
+omega: 45 lr: 0.0001 iter: 1000 PSNR: 24.9128 SSIM: 0.6720 LPIPS: 0.5517
+omega: 45 lr: 0.0001 iter: 500 PSNR: 24.9108 SSIM: 0.6717 LPIPS: 0.5558
+omega: 20 lr: 0.0001 iter: 2000 PSNR: 24.9104 SSIM: 0.6725 LPIPS: 0.5505
+omega: 45 lr: 0.0001 iter: 2000 PSNR: 24.9022 SSIM: 0.6716 LPIPS: 0.5494
+omega: 20 lr: 0.0001 iter: 500 PSNR: 24.8810 SSIM: 0.6684 LPIPS: 0.5700
+omega: 30 lr: 0.0001 iter: 4000 PSNR: 24.8626 SSIM: 0.6709 LPIPS: 0.5506
+
+
+
+hiddenFeatures: 256 hiddenLayers: 4 iter: 500 PSNR: 24.9365 SSIM: 0.6734 LPIPS: 0.5549
+hiddenFeatures: 256 hiddenLayers: 3 iter: 1000 PSNR: 24.9284 SSIM: 0.6723 LPIPS: 0.5554
+hiddenFeatures: 256 hiddenLayers: 3 iter: 2000 PSNR: 24.9234 SSIM: 0.6723 LPIPS: 0.5525
+hiddenFeatures: 512 hiddenLayers: 3 iter: 500 PSNR: 24.9228 SSIM: 0.6725 LPIPS: 0.5569
+hiddenFeatures: 512 hiddenLayers: 3 iter: 250 PSNR: 24.9223 SSIM: 0.6713 LPIPS: 0.5641
+hiddenFeatures: 512 hiddenLayers: 3 iter: 1000 PSNR: 24.9148 SSIM: 0.6724 LPIPS: 0.5546
+hiddenFeatures: 256 hiddenLayers: 3 iter: 500 PSNR: 24.9145 SSIM: 0.6707 LPIPS: 0.5637
+hiddenFeatures: 512 hiddenLayers: 2 iter: 1000 PSNR: 24.9057 SSIM: 0.6721 LPIPS: 0.5608
+hiddenFeatures: 256 hiddenLayers: 4 iter: 1000 PSNR: 24.9050 SSIM: 0.6738 LPIPS: 0.5484
+hiddenFeatures: 512 hiddenLayers: 2 iter: 500 PSNR: 24.9018 SSIM: 0.6714 LPIPS: 0.5656

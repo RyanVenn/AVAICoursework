@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 import lpips
 import argparse
 import os
+import time
+import csv
+import itertools
+import copy
 
 parser = argparse.ArgumentParser(
     description="Train a Deep Image Prior model on DIV2k",
@@ -20,10 +24,12 @@ parser.add_argument("--img-id", default="0801")
 parser.add_argument("--scale", default=8, type=int, choices=[8, 16])
 parser.add_argument("--crop", default=512, type=int)
 parser.add_argument("--iters", default=2000, type=int)
-parser.add_argument("--learning-rate", default=0.01, type=float)
+parser.add_argument("--learning-rate", default=0.003, type=float)
 parser.add_argument("--reg-noise-std", default=1./30, type=float)
 parser.add_argument("--seed", default=0, type=int)
 parser.add_argument("--noise-sigma", default=0.0, type=float)
+parser.add_argument("--tune-hyperparams", action="store_true")
+parser.add_argument("--tune-images", nargs="+", default=["0801", "0806", "0840"])
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.cuda.FloatTensor
@@ -32,7 +38,7 @@ HR_DIR = '../../data/DIV2K_valid_HR'
 LR_DIR = '../../data/DIV2K_valid_LR_x8'
 
 # Crop images so that the HR and LR pairs align with their scaling
-def crop_image_pair(hr_img, lr_img, scale, crop):
+def cropImagePair(hr_img, lr_img, scale, crop):
     # d=4 ensires hr is a multiple of 32 for skip (4*8)
     lr_crop = crop_image(lr_img, d=4)
     x0 = (lr_img.size[0] - lr_crop.size[0]) // 2
@@ -58,7 +64,7 @@ def downsampler(x, factor):
                          antialias=True, align_corners=False)
 
 # Plots the LR, HR, and reconstructed image at iteration i
-def plot_iteration(i, lr, hr, recon):
+def plotIteration(i, lr, hr, recon):
     recon_display = np.clip(torch_to_np(recon), 0, 1)
     recon_display = np.transpose(recon_display, (1, 2, 0))
     
@@ -95,15 +101,15 @@ def plot_iteration(i, lr, hr, recon):
         f"results/iteration_{i}.png"
     )
     plt.close(fig)
-
-def main(args):
+    
+def runDIP(args, lpips_fn, cps=(), log=True):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
     # Open high-res and low-res images
     hr_pil = get_image(f'{HR_DIR}/{args.img_id}.png')[0]
     lr_pil = get_image(f'{LR_DIR}/{args.img_id}x8.png')[0]
-    hr_pil, lr_pil = crop_image_pair(hr_pil, lr_pil, 8, args.crop)
+    hr_pil, lr_pil = cropImagePair(hr_pil, lr_pil, 8, args.crop)
     
     img_np, lr_np = pil_to_np(hr_pil), pil_to_np(lr_pil)
     lr_torch = np_to_torch(lr_np).type(dtype) 
@@ -121,8 +127,8 @@ def main(args):
     
     # Network structure
     net = get_net(32, 'skip', 'reflection',
-                  skip_n33d=128, skip_n33u=128, skip_n11=4,
-                  num_scales=5, upsample_mode='bilinear').type(dtype)
+                    skip_n33d=128, skip_n33u=128, skip_n11=4,
+                    num_scales=5, upsample_mode='bilinear').type(dtype)
     
     # Get input for network
     net_input = get_noise(32, 'noise', (img_np.shape[1], img_np.shape[2])).type(dtype).detach()
@@ -137,10 +143,23 @@ def main(args):
     
     i = 0
     os.makedirs("results", exist_ok=True)
-    lpips_fn = lpips.LPIPS(net="alex").to(DEVICE)
+    
+    def evaluate(evalImg):
+            evalImg = evalImg.clamp(0, 1)
+            a = torch_to_np(evalImg)
+            with torch.no_grad():
+                # * 2 - 1 takes image from [0, 1] to [-1, 1]
+                l = lpips_fn(evalImg * 2 - 1, img_torch * 2 - 1).item()
+            return psnr_fn(img_np, a, data_range=1), ssim_fn(img_np, a, channel_axis=0, data_range=1), l
+    
+    results = []
     
     def closure():
         nonlocal i, net_input
+        
+        if i in cps:
+            with torch.no_grad():
+                results.append((i,) + evaluate(net(net_input_saved)))
         
         if args.reg_noise_std > 0:
             net_input = net_input_saved + (noise.normal_() * args.reg_noise_std)
@@ -150,34 +169,70 @@ def main(args):
         loss = mse(downsampler(out, args.scale), lr_torch)
         loss.backward()
         
-        if i % 10 == 0:
+        if i % 10 == 0 and log:
             p = psnr_fn(img_np, np.clip(torch_to_np(out), 0, 1), data_range=1)
             print('Iteration: ', i, ' Loss: ', loss.item(), ' PSNR_gt: ', p)
         
-        if i % 100 == 0:
-            plot_iteration(i, lr_torch, img_np, out)
+        if i % 100 == 0 and log:
+            plotIteration(i, lr_torch, img_np, out)
             
         i += 1
         return loss
     
+    start = time.time()
     params = get_params('net', net, net_input)
     optimize('adam', params, closure, args.learning_rate, args.iters)
     
-    def evaluate(i):
-        i = i.clamp(0, 1)
-        a = torch_to_np(i)
-        with torch.no_grad():
-            # * 2 - 1 takes image from [0, 1] to [-1, 1]
-            l = lpips_fn(i * 2 - 1, img_torch * 2 - 1).item()
-        return psnr_fn(img_np, a, data_range=1), ssim_fn(img_np, a, channel_axis=0, data_range=1), l
+    if log:
+        print(f"time elapsed: {time.time() - start:.2f}s")  
 
     with torch.no_grad():
         recon = net(net_input_saved)
     bicubic = F.interpolate(lr_torch, size=img_torch.shape[-2:], mode='bicubic', align_corners=False)
 
-    for name, img in [('bicubic', bicubic), ('DIP', recon)]:
-        p, s, l = evaluate(img)
-        print(f"{name} PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}")
+    if log:
+        for name, img in [('bicubic', bicubic), ('DIP', recon)]:
+            p, s, l = evaluate(img)
+            print(f"{name} PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}")
 
+    return results
+
+# Performs a search over selected hyperparameters
+def searchParams(args, lpips_fn):
+    cps = [500, 1000, 1500, 2000]
+    os.makedirs("results", exist_ok=True)
+    results = {}
+    
+    with open("results/dipTuning.csv", "a", newline="") as f:
+        w = csv.writer(f)
+        for lr, reg in itertools.product([0.003, 0.01, 0.03], [0.0, 1./30, 0.1]):
+            for img_id in args.tune_images:
+                a = copy.copy(args)
+                a.img_id, a.learning_rate, a.reg_noise_std = img_id, lr, reg
+                a.iters = max(cps) + 1
+                start = time.time()
+                res = runDIP(a, lpips_fn, cps, log=False)
+                for iteration, p, s, l in res:
+                    results.setdefault((lr, reg, iteration), []).append((p, s, l))
+                    w.writerow([img_id, lr, reg, iteration, f"PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}"])
+                f.flush()
+                torch.cuda.empty_cache()
+                print(f"{img_id} lr: {lr} reg: {reg} PSNR: {p:.4f} SSIM: {s:.4f} LPIPS: {l:.4f} "
+                      f"time elapsed: {time.time() - start:.2f}s")
+        
+        sortedRes = sorted(((np.mean([r[0] for r in v]), np.mean([r[1] for r in v]),
+                            np.mean([r[2] for r in v]), k) for k, v in results.items()), reverse=True)
+        for p, s, l, (lr, reg, iteration) in sortedRes[:10]:
+            print(f"lr: {lr} reg: {reg} iter: {iteration} PSNR: {p:.4f} SSIM: {s:.4f} LPIPS: {l:.4f}")
+
+def main(args):
+    lpips_fn = lpips.LPIPS(net="alex").to(DEVICE)
+    if args.tune_hyperparams:
+        searchParams(args, lpips_fn)
+    else:
+        runDIP(args, lpips_fn)
+    
 if __name__ == "__main__":
     main(parser.parse_args())
+    
+    # TODO: seed noise for comparison
