@@ -30,6 +30,8 @@ parser.add_argument("--seed", default=0, type=int)
 parser.add_argument("--noise-sigma", default=0.0, type=float)
 parser.add_argument("--tune-hyperparams", action="store_true")
 parser.add_argument("--tune-images", nargs="+", default=["0801", "0806", "0840"])
+parser.add_argument("--eval", action="store_true")
+parser.add_argument("--out", default="results/dip_x8.csv")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.cuda.FloatTensor
@@ -135,8 +137,9 @@ def runDIP(args, lpips_fn, cps=(), log=True):
     net_input_saved, noise = net_input.detach().clone(), net_input.detach().clone()
     
     # Compute number of parameters
-    s  = sum([np.prod(list(p.size())) for p in net.parameters()]);
-    print ('Number of params: %d' % s)
+    s  = sum([np.prod(list(p.size())) for p in net.parameters()])
+    if log:
+        print ('Number of params: %d' % s)
     
     # Loss
     mse = torch.nn.MSELoss().type(dtype)
@@ -195,7 +198,7 @@ def runDIP(args, lpips_fn, cps=(), log=True):
             p, s, l = evaluate(img)
             print(f"{name} PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}")
 
-    return results
+    return results, evaluate(bicubic)
 
 # Performs a search over selected hyperparameters
 def searchParams(args, lpips_fn):
@@ -211,7 +214,7 @@ def searchParams(args, lpips_fn):
                 a.img_id, a.learning_rate, a.reg_noise_std = img_id, lr, reg
                 a.iters = max(cps) + 1
                 start = time.time()
-                res = runDIP(a, lpips_fn, cps, log=False)
+                res, _ = runDIP(a, lpips_fn, cps, log=False)
                 for iteration, p, s, l in res:
                     results.setdefault((lr, reg, iteration), []).append((p, s, l))
                     w.writerow([img_id, lr, reg, iteration, f"PSNR {p:.4f} SSIM {s:.4f} LPIPS {l:.4f}"])
@@ -225,14 +228,47 @@ def searchParams(args, lpips_fn):
         for p, s, l, (lr, reg, iteration) in sortedRes[:10]:
             print(f"lr: {lr} reg: {reg} iter: {iteration} PSNR: {p:.4f} SSIM: {s:.4f} LPIPS: {l:.4f}")
 
+def runEvalSet(args, lpips_fn):
+    imgIDs = [f"0{i}" for i in range(801, 901) if f"0{i}" not in args.tune_images]
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    done = set() # TODO TEMP CODE
+    if os.path.exists(args.out):
+        with open(args.out) as f:
+            for r in csv.DictReader(f):
+                done.add(r["img_id"])
+                
+    new = not os.path.exists(args.out)
+    with open(args.out, "a", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["img_id", "scale", "noise_sigma", "seed", "iters", "dip_psnr",
+                        "dip_ssim", "dip_lpips", "bic_psnr", "bic_ssim", "bic_lpips", "time"])
+        for i, imgId in enumerate(imgIDs, 1):
+            if imgId in done: # TODO temp line
+                continue
+            a = copy.copy(args)
+            a.img_id = imgId
+            a.iters = args.iters + 1
+            start = time.time()
+            res, bic = runDIP(a, lpips_fn, [args.iters], log=False)
+            _, p, s, l = res[0]
+            w.writerow([imgId, args.scale, args.noise_sigma, args.seed, args.iters,
+                        p, s, l, bic[0], bic[1], bic[2], time.time() - start])
+            f.flush()
+            torch.cuda.empty_cache()
+            print(f"[{i}/{len(imgIDs)}] {imgId} DIP_PSNR {p} BIC_PSNR {bic[0]} elapsed {time.time() - start}s")
+            
+            
 def main(args):
     lpips_fn = lpips.LPIPS(net="alex").to(DEVICE)
     if args.tune_hyperparams:
         searchParams(args, lpips_fn)
+    elif args.eval:
+        runEvalSet(args, lpips_fn)
     else:
         runDIP(args, lpips_fn)
     
 if __name__ == "__main__":
     main(parser.parse_args())
     
-    # TODO: seed noise for comparison
+# TODO: seed noise for comparison
